@@ -3,7 +3,6 @@
 import ctypes as c
 from ctypes import wintypes as w
 from dataclasses import dataclass
-from pathlib import PureWindowsPath
 
 
 def bind(library, name, result, *arguments):
@@ -20,9 +19,6 @@ window_visible = bind(user, "IsWindowVisible", w.BOOL, w.HWND)
 get_window_rect = bind(user, "GetWindowRect", w.BOOL, w.HWND, c.POINTER(w.RECT))
 get_dpi = bind(user, "GetDpiForWindow", w.UINT, w.HWND)
 get_foreground_window = bind(user, "GetForegroundWindow", w.HWND)
-get_window_pid = bind(user, "GetWindowThreadProcessId", w.DWORD, w.HWND, c.POINTER(w.DWORD))
-open_process = bind(kernel, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)
-query_process_image = bind(kernel, "QueryFullProcessImageNameW", w.BOOL, w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD))
 monitor_from_window = bind(user, "MonitorFromWindow", w.HMONITOR, w.HWND, w.DWORD)
 get_monitor_info = bind(user, "GetMonitorInfoW", w.BOOL, w.HMONITOR, c.c_void_p)
 get_ancestor = bind(user, "GetAncestor", w.HWND, w.HWND, w.UINT)
@@ -77,23 +73,6 @@ def monitor_bounds(candidate):
     if monitor and get_monitor_info(monitor, c.byref(info)):
         return info.monitor
     return None
-
-
-def window_program(hwnd):
-    pid = w.DWORD()
-    if not get_window_pid(hwnd, c.byref(pid)):
-        return ""
-    process = open_process(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not process:
-        return ""
-    try:
-        length = w.DWORD(32768)
-        path = c.create_unicode_buffer(length.value)
-        if query_process_image(process, 0, path, c.byref(length)):
-            return PureWindowsPath(path.value).name.lower()
-        return ""
-    finally:
-        close_handle(process)
 
 
 def configure_overlay(tk_window_id):

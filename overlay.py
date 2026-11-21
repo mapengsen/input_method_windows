@@ -13,11 +13,6 @@ from startup import StartupShortcut
 from tray import TrayIcon
 import windows
 
-try:
-    from wechat_preview import WeChatPreviewReader
-except ImportError:
-    WeChatPreviewReader = None
-
 
 CLOSE_ACTION_LABELS = {"exit": "退出程序", "minimize": "最小化到任务栏", "tray": "收起到系统托盘"}
 
@@ -44,15 +39,15 @@ class Overlay:
             windows.hide_overlay(self.hwnd)
             self.placement = None
 
-    def draw(self, candidate, preview, font_size, ceiling=None):
-        placement = (candidate, preview, font_size, ceiling)
+    def draw(self, candidate, preview, font_size):
+        placement = (candidate, preview, font_size)
         if placement == self.placement:
             return
 
         dpi = windows.get_dpi(candidate.hwnd) or 96
         self.font.configure(size=-round(font_size * dpi / 72))
         height = self.font.metrics("linespace") + 9
-        y = (candidate.top if ceiling is None else ceiling) - height - 2
+        y = candidate.top - height - 2
         monitor = windows.monitor_bounds(candidate)
         x = candidate.left
         width = max(candidate.width, self.font.measure(preview.text) + 24)
@@ -87,9 +82,6 @@ class Application:
         self.root.withdraw()
         self.root.title("微信拼音浮窗")
         self.reader = CompositionReader()
-        self.wechat_reader = None
-        self.wechat_checked_window = None
-        self.foreground_is_wechat = False
         self.preferences = Preferences.load()
         self.root.protocol("WM_DELETE_WINDOW", self.close_window)
         self.preview_state = None
@@ -291,22 +283,6 @@ class Application:
         if self.paused:
             self.overlay.hide()
             self.invalidate_preview()
-            if self.wechat_reader is not None:
-                self.wechat_reader.clear()
-
-    def visible_wechat_preview(self, foreground, candidate):
-        if WeChatPreviewReader is None:
-            return None, None
-        if foreground != self.wechat_checked_window:
-            self.wechat_checked_window = foreground
-            self.foreground_is_wechat = windows.window_program(foreground) == "weixin.exe"
-            if self.wechat_reader is not None:
-                self.wechat_reader.clear()
-        if not self.foreground_is_wechat or self.reader.is_password_field():
-            return None, None
-        if self.wechat_reader is None:
-            self.wechat_reader = WeChatPreviewReader()
-        return self.wechat_reader.read(foreground, candidate)
 
     def refresh(self):
         if self.tray_icon is not None and self.tray_icon.should_restore():
@@ -315,17 +291,12 @@ class Application:
         if candidate is None:
             self.overlay.hide()
             self.invalidate_preview()
-            if self.wechat_reader is not None:
-                self.wechat_reader.clear()
         else:
             foreground = windows.get_foreground_window()
             preview = self.reader.current_preview(candidate)
-            ceiling = None
-            if preview is None and foreground:
-                preview, ceiling = self.visible_wechat_preview(foreground, candidate)
             if preview and foreground == windows.get_foreground_window() and candidate == windows.find_candidate():
                 self.preview_state = (foreground, candidate, preview, monotonic())
-                self.overlay.draw(candidate, preview, self.preferences.font_size, ceiling)
+                self.overlay.draw(candidate, preview, self.preferences.font_size)
             else:
                 self.overlay.hide()
                 self.invalidate_preview()
