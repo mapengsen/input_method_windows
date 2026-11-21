@@ -9,7 +9,17 @@ from comtypes import COMError
 from composition import CompositionReader
 from preferences import MAX_FONT, MIN_FONT, Preferences
 from shortcuts import KeyboardShortcuts, VK_CAPITAL, WeTypeProfile, caps_locked, send_key
+from startup import StartupShortcut
+from tray import TrayIcon
 import windows
+
+try:
+    from wechat_preview import WeChatPreviewReader
+except ImportError:
+    WeChatPreviewReader = None
+
+
+CLOSE_ACTION_LABELS = {"exit": "退出程序", "minimize": "最小化到任务栏", "tray": "收起到系统托盘"}
 
 
 class Overlay:
@@ -34,15 +44,15 @@ class Overlay:
             windows.hide_overlay(self.hwnd)
             self.placement = None
 
-    def draw(self, candidate, preview, font_size):
-        placement = (candidate, preview, font_size)
+    def draw(self, candidate, preview, font_size, ceiling=None):
+        placement = (candidate, preview, font_size, ceiling)
         if placement == self.placement:
             return
 
         dpi = windows.get_dpi(candidate.hwnd) or 96
         self.font.configure(size=-round(font_size * dpi / 72))
         height = self.font.metrics("linespace") + 9
-        y = candidate.top - height - 2
+        y = (candidate.top if ceiling is None else ceiling) - height - 2
         monitor = windows.monitor_bounds(candidate)
         x = candidate.left
         width = max(candidate.width, self.font.measure(preview.text) + 24)
@@ -77,10 +87,15 @@ class Application:
         self.root.withdraw()
         self.root.title("微信拼音浮窗")
         self.reader = CompositionReader()
+        self.wechat_reader = None
+        self.wechat_checked_window = None
+        self.foreground_is_wechat = False
         self.preferences = Preferences.load()
+        self.root.protocol("WM_DELETE_WINDOW", self.close_window)
         self.preview_state = None
         self.pending_shift_window = None
         self.paused = False
+        self.tray_icon = None
         self.overlay = Overlay(root)
         self.keyboard = None
         try:
@@ -124,11 +139,39 @@ class Application:
         if self.keyboard is None:
             self.shift_option.state(["disabled"])
 
+        close_row = ttk.Frame(frame)
+        close_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(close_row, text="点 × 时").pack(side="left", padx=(0, 8))
+        self.close_action = tk.StringVar(value=CLOSE_ACTION_LABELS[self.preferences.close_action])
+        close_menu = ttk.Combobox(
+            close_row, textvariable=self.close_action, values=tuple(CLOSE_ACTION_LABELS.values()),
+            state="readonly", width=16,
+        )
+        close_menu.pack(side="left")
+        close_menu.bind("<<ComboboxSelected>>", self.change_close_action)
+
+        try:
+            self.startup = StartupShortcut()
+            startup_enabled = self.startup.enabled()
+        except (COMError, OSError):
+            self.startup = None
+            startup_enabled = False
+        self.startup_enabled = tk.BooleanVar(value=startup_enabled)
+        startup_option = ttk.Checkbutton(
+            frame, text="登录 Windows 后自动启动", variable=self.startup_enabled,
+            command=self.change_startup,
+        )
+        startup_option.pack(anchor="w", pady=(0, 12))
+        if self.startup is None:
+            startup_option.configure(text="登录 Windows 后自动启动（不可用）", state="disabled")
+        else:
+            self.root.bind("<FocusIn>", self.refresh_startup_option, add=True)
+
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
         self.toggle = ttk.Button(buttons, text="暂停", command=self.toggle_pause)
         self.toggle.pack(side="left", padx=(0, 8))
-        ttk.Button(buttons, text="退出", command=root.destroy).pack(side="left")
+        ttk.Button(buttons, text="退出", command=self.exit_program).pack(side="left")
 
         self.root.update_idletasks()
         width, height = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
@@ -157,6 +200,60 @@ class Application:
         self.preferences.shift_caps = self.shift_enabled.get()
         self.keyboard.shift_enabled = self.preferences.shift_caps and not self.paused
         self.save_preferences()
+
+    def change_close_action(self, _event):
+        selection = self.close_action.get()
+        self.preferences.close_action = next(action for action, label in CLOSE_ACTION_LABELS.items() if label == selection)
+        self.save_preferences()
+
+    def close_window(self):
+        action = self.preferences.close_action
+        if action == "exit":
+            self.exit_program()
+            return
+        if action == "tray":
+            if self.hide_in_tray():
+                return
+            self.status.set("系统托盘暂不可用 · 已最小化到任务栏")
+        self.root.iconify()
+
+    def hide_in_tray(self):
+        try:
+            if self.tray_icon is None:
+                hwnd = windows.get_ancestor(self.root.winfo_id(), 2)
+                self.tray_icon = TrayIcon(hwnd, self.root.title())
+            if self.tray_icon.show():
+                self.root.withdraw()
+                return True
+        except OSError:
+            pass
+        return False
+
+    def restore_from_tray(self):
+        self.tray_icon.hide()
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def close_tray(self):
+        if self.tray_icon is not None:
+            self.tray_icon.close()
+            self.tray_icon = None
+
+    def exit_program(self):
+        self.close_tray()
+        self.root.destroy()
+
+    def refresh_startup_option(self, event):
+        if event.widget is self.root:
+            self.startup_enabled.set(self.startup.enabled())
+
+    def change_startup(self):
+        try:
+            self.startup.set_enabled(self.startup_enabled.get())
+        except (COMError, OSError) as error:
+            self.startup_enabled.set(self.startup.enabled())
+            messagebox.showerror("无法更改自动启动", str(error), parent=self.root)
 
     def invalidate_preview(self):
         self.preview_state = None
@@ -194,18 +291,41 @@ class Application:
         if self.paused:
             self.overlay.hide()
             self.invalidate_preview()
+            if self.wechat_reader is not None:
+                self.wechat_reader.clear()
+
+    def visible_wechat_preview(self, foreground, candidate):
+        if WeChatPreviewReader is None:
+            return None, None
+        if foreground != self.wechat_checked_window:
+            self.wechat_checked_window = foreground
+            self.foreground_is_wechat = windows.window_program(foreground) == "weixin.exe"
+            if self.wechat_reader is not None:
+                self.wechat_reader.clear()
+        if not self.foreground_is_wechat or self.reader.is_password_field():
+            return None, None
+        if self.wechat_reader is None:
+            self.wechat_reader = WeChatPreviewReader()
+        return self.wechat_reader.read(foreground, candidate)
 
     def refresh(self):
+        if self.tray_icon is not None and self.tray_icon.should_restore():
+            self.restore_from_tray()
         candidate = None if self.paused else windows.find_candidate()
         if candidate is None:
             self.overlay.hide()
             self.invalidate_preview()
+            if self.wechat_reader is not None:
+                self.wechat_reader.clear()
         else:
             foreground = windows.get_foreground_window()
-            preview = self.reader.current_preview()
+            preview = self.reader.current_preview(candidate)
+            ceiling = None
+            if preview is None and foreground:
+                preview, ceiling = self.visible_wechat_preview(foreground, candidate)
             if preview and foreground == windows.get_foreground_window() and candidate == windows.find_candidate():
                 self.preview_state = (foreground, candidate, preview, monotonic())
-                self.overlay.draw(candidate, preview, self.preferences.font_size)
+                self.overlay.draw(candidate, preview, self.preferences.font_size, ceiling)
             else:
                 self.overlay.hide()
                 self.invalidate_preview()
@@ -229,6 +349,7 @@ def main():
         try:
             root.mainloop()
         finally:
+            app.close_tray()
             if app.keyboard is not None:
                 app.keyboard.close()
     finally:

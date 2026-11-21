@@ -12,11 +12,11 @@ if not exist ".venv\Scripts\python.exe" (
     if errorlevel 1 goto failed
 )
 
-".venv\Scripts\python.exe" -c "import tkinter, comtypes" >nul 2>&1
+".venv\Scripts\python.exe" -c "import tkinter, comtypes, wechat_preview" >nul 2>&1
 if errorlevel 1 (
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
     if errorlevel 1 goto failed
-    ".venv\Scripts\python.exe" -c "import tkinter, comtypes"
+    ".venv\Scripts\python.exe" -c "import tkinter, comtypes, wechat_preview"
     if errorlevel 1 goto failed
 )
 

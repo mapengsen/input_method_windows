@@ -15,6 +15,7 @@ SETTINGS = Path(os.environ["LOCALAPPDATA"]) / "WeTypePinyinOverlay" / "settings.
 class Preferences:
     font_size: int = 12
     shift_caps: bool = True
+    close_action: str = "exit"
 
     @classmethod
     def load(cls):
@@ -30,6 +31,9 @@ class Preferences:
             shift_caps = saved.get("shift_caps")
             if isinstance(shift_caps, bool):
                 preferences.shift_caps = shift_caps
+            close_action = saved.get("close_action")
+            if close_action in ("exit", "minimize", "tray"):
+                preferences.close_action = close_action
         return preferences
 
     def save(self):

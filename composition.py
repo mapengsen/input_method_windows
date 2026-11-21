@@ -43,17 +43,17 @@ class CompositionReader:
         except COMError:
             return True
 
-    def current_preview(self):
+    def current_preview(self, candidate=None):
         try:
             element = self.automation.GetFocusedElement()
             if not element or element.CurrentIsPassword:
                 return None
             pattern = element.GetCurrentPattern(self.uia.UIA_TextEditPatternId)
             if not pattern:
-                return None
+                return self.address_bar_preview(element, candidate)
             composition = pattern.QueryInterface(self.uia.IUIAutomationTextEditPattern).GetActiveComposition()
             if not composition:
-                return None
+                return self.address_bar_preview(element, candidate)
             source = composition.GetText(256).rstrip()
         except COMError:
             # Focus or the active composition can vanish during the query.
@@ -65,6 +65,26 @@ class CompositionReader:
         caret = self.caret_offset(element, composition, source)
         relative_caret = None if caret is None else max(0, caret - match.start())
         return PinyinPreview(match.group(0), relative_caret)
+
+    def address_bar_preview(self, element, candidate):
+        if candidate is None or element.CurrentClassName != "OmniboxViewViews":
+            return None
+        bounds = element.CurrentBoundingRectangle
+        # WeType anchors the candidate row at the start of the pending text.
+        # With a nonempty prefix the anchor moves inward, so the address bar's
+        # full range would also include text entered before this composition.
+        if abs(candidate.left - bounds.left) > 6 or abs(candidate.top - bounds.bottom) > candidate.height:
+            return None
+        pattern = element.GetCurrentPattern(self.uia.UIA_TextPatternId)
+        if not pattern:
+            return None
+        document = pattern.QueryInterface(self.uia.IUIAutomationTextPattern).DocumentRange
+        if not document:
+            return None
+        text = document.GetText(257)
+        if not text or len(text) > 256 or not PINYIN_TAIL.fullmatch(text):
+            return None
+        return PinyinPreview(text, self.caret_offset(element, document, text))
 
     def caret_offset(self, element, composition, source):
         try:
